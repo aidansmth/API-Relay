@@ -1,0 +1,6 @@
+version: "3.9"
+services:
+  api_relay:
+    build: .
+    ports:
+      - "80:80"
