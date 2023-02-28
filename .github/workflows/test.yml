@@ -7,13 +7,10 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env: SPIN_URL: ${{ secrets.SPIN_KEY }}
     steps:
       - uses: actions/checkout@v3
       - name: Build
-        env:
-          SPIN_URL: ${{ secrets.SPIN_KEY }}
         run: cargo build
       - name: Run tests
-        env:
-          SPIN_URL: ${{ secrets.SPIN_KEY }}
         run: cargo test
