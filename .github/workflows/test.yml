@@ -4,19 +4,13 @@ on:
     branches: [main]
 env:
   CARGO_TERM_COLOR: always
+  SPIN_URL: ${{ secrets.SPIN_KEY }}
 jobs:
   test:
     runs-on: ubuntu-latest
-    
     steps:
       - uses: actions/checkout@v3
       - name: Build
-        run: |
-          cargo build
-        env: 
-          SPIN_URL: ${{ secrets.SPIN_KEY }}
+        run: cargo build
       - name: Run tests
-        run: |
-          cargo test
-        env: 
-          SPIN_URL: ${{ secrets.SPIN_KEY }}
+        run: cargo test
