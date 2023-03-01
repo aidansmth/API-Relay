@@ -1,6 +1,8 @@
 version: "3.9"
 services:
   api_relay:
+    environment:
+        SPIN_KEY: ${SPIN_KEY}
     build: .
     ports:
       - "80:80"
