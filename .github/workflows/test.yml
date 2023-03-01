@@ -7,9 +7,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: 'Create env file'
-        run: echo "${{ secrets.SPIN_KEY }}" > .env
       - name: Build
         run: cargo build
       - name: Run tests
         run: cargo test
+    with:
+      SPIN_KEY: ${{ secrets.SPIN_KEY }}
