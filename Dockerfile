@@ -29,10 +29,11 @@ WORKDIR /app
 EXPOSE 80
 
 # Pass environmental variable SPIN_KEY to container
-ENV SPIN_KEY=$SPIN_KEY
+
 
 # install the program onto the current image
 COPY --from=build /usr/local/cargo/bin/api_relay /usr/local/bin/api_relay
 
-# this command is run when we actually start the container
-CMD ["api_relay"]
+# this command is run when we actually start the container along with env variable SPIN_KEY
+CMD SPIN_KEY=$SPIN_KEY /usr/local/bin/api_relay
+# CMD ["api_relay"]
