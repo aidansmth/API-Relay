@@ -28,6 +28,9 @@ WORKDIR /app
 # allow requests to port 80
 EXPOSE 80
 
+# Pass environmental variable SPIN_KEY to container
+ENV SPIN_KEY=$SPIN_KEY
+
 # install the program onto the current image
 COPY --from=build /usr/local/cargo/bin/api_relay /usr/local/bin/api_relay
 
