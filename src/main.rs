@@ -67,14 +67,30 @@ mod filters {
         warp::header::exact_ignore_case("Content-Type", "application/x-www-form-urlencoded")
     }
 }
-
 mod handlers {
-    use std::env;
+    use std::{env};
 
-    use log::info;
+    use log::{info, debug};
     use serde_json::{Value};
 
     use super::models::Db;
+
+    async fn remove_links(v: Value) -> Value {
+        let mut new_v = Value::Object(serde_json::Map::new());
+        let arr = v["items"].as_array().unwrap();
+        for i in 0..5 {
+            let iter = arr[i].as_object().unwrap();
+            let mut new_iter = Value::Object(serde_json::Map::new());
+            for (key, value) in iter {
+                if key != "_links" {
+                    new_iter[key] = value.clone();
+                }
+            }
+            new_v[i.to_string()] = new_iter;
+        }
+        debug!("new_v: {:?}", new_v);
+        new_v
+    }
 
     pub async fn update(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
         let data_source_url =
@@ -95,7 +111,9 @@ mod handlers {
 
         // Store in db
         let mut db = db.lock().await;
-        *db = v.clone();
+        // Remove _links field
+        *db = remove_links(v).await;
+
 
         Ok(warp::reply::with_status(
             "Fetching update.",
@@ -106,7 +124,7 @@ mod handlers {
     pub async fn get(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
         let db = db.lock().await;
         let resp = db.clone();
-        Ok(warp::reply::json(&resp["items"]))
+        Ok(warp::reply::json(&resp))
     }
 
 }
@@ -189,6 +207,4 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
-
-
 }
