@@ -19,7 +19,7 @@ async fn main() {
 
     let api = filters::routes(spin_db, show_db);
 
-    warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
+    warp::serve(api).run(([0, 0, 0, 0], 80)).await;
 }
 
 async fn create_cron(show_db: models::Db) {
