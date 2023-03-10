@@ -1,17 +1,65 @@
+#[macro_use]
+extern crate log;
 
 use pretty_env_logger;
+use tokio_cron_scheduler::{Job, JobScheduler};
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
 
-    let db = models::blank_db();
+    let spin_db = models::blank_db();
+    let show_db = models::blank_db();
 
-    _ = handlers::update(db.clone()).await;
+    _ = handlers::update_spins(spin_db.clone()).await;
+    _ = handlers::update_shows(show_db.clone()).await;
 
-    let api = filters::routes(db);
+    // Create cron job to update shows every hour
+    let _ = create_cron(show_db.clone()).await;
 
-    warp::serve(api).run(([0, 0, 0, 0], 80)).await;
+    let api = filters::routes(spin_db, show_db);
+
+    warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
+}
+
+async fn create_cron(show_db: models::Db) {
+let scheduler = JobScheduler::new().await;
+
+    let show_db_clone = show_db.clone();
+
+    match scheduler {
+        Ok(sched) => {
+            // create job
+            let job = Job::new_async("* 0 * * * *", move |_, _| {
+                let short_lived_db = show_db_clone.clone();
+                Box::pin(async {
+                    info!("Top of the hour, updating shows.");
+                    let _ = handlers::update_shows(short_lived_db).await;
+                })
+            });
+            // add job to scheduler
+            match job {
+                Ok(job) => {
+                    match sched.add(job).await {
+                        Ok(_) => {
+                            info!("Job added to scheduler");
+                        }
+                        Err(e) => {
+                            error!("Error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Error: {}", e);
+                }
+            }
+            // start scheduler
+            let _ = sched.start().await;
+        },
+        Err(e) => {
+            error!("Error: {}", e);
+        }
+    }
 }
 
 mod filters {
@@ -20,34 +68,59 @@ mod filters {
     use warp::Filter;
 
     pub fn routes(
-        db: Db,
+        spin_db: Db,
+        show_db: Db,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        post_update(db.clone())
-        .or(get_data(db.clone()))
-        .or(health_check())
-        .or(not_found())
+        spin_update(spin_db.clone())
+            .or(get_spin(spin_db.clone()))
+            .or(show_update(show_db.clone()))
+            .or(get_show(show_db.clone()))
+            .or(health_check())
+            .or(not_found())
     }
 
-    pub fn post_update(
-        db: Db,
+    // Update methods
+    pub fn spin_update(
+        spin_db: Db,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("update")
+        warp::path!("spins" / "update")
             .and(warp::post())
             .and(is_form_content())
-            .and(with_db(db))
-            .and_then(handlers::update)
+            .and(with_db(spin_db))
+            .and_then(handlers::update_spins)
     }
 
-    pub fn get_data(
-        db: Db,
+    pub fn show_update(
+        show_db: Db,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-            warp::path!("get")
+        warp::path!("shows" / "update")
+            .and(warp::post())
+            .and(is_form_content())
+            .and(with_db(show_db))
+            .and_then(handlers::update_shows)
+    }
+
+    // Get methods
+    pub fn get_spin(
+        spin_db: Db,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("spins" / "get")
             .and(warp::get())
-            .and(with_db(db))
+            .and(with_db(spin_db))
             .and_then(handlers::get)
     }
 
-    pub fn health_check() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    pub fn get_show(
+        show_db: Db,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("shows" / "get")
+            .and(warp::get())
+            .and(with_db(show_db))
+            .and_then(handlers::get)
+    }
+
+    pub fn health_check() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
+    {
         warp::path!("healthCheck")
             .and(warp::get())
             .map(|| warp::reply::with_status("OK", warp::http::StatusCode::OK))
@@ -68,17 +141,17 @@ mod filters {
     }
 }
 mod handlers {
-    use std::{env};
+    use std::env;
 
-    use log::{info, debug};
-    use serde_json::{Value};
+    use log::{debug, info};
+    use serde_json::Value;
 
     use super::models::Db;
 
     async fn remove_links(v: Value) -> Value {
         let mut new_v = Value::Object(serde_json::Map::new());
         let arr = v["items"].as_array().unwrap();
-        for i in 0..5 {
+        for i in 0..arr.len() {
             let iter = arr[i].as_object().unwrap();
             let mut new_iter = Value::Object(serde_json::Map::new());
             for (key, value) in iter {
@@ -92,9 +165,8 @@ mod handlers {
         new_v
     }
 
-    pub async fn update(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-        let data_source_url =
-            "https://spinitron.com/api/spins/?access-token=";
+    pub async fn update_spins(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+        let data_source_url = "https://spinitron.com/api/spins/?access-token=";
         let access_token = match env::var("SPIN_KEY") {
             Ok(v) => v,
             Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
@@ -114,6 +186,32 @@ mod handlers {
         // Remove _links field
         *db = remove_links(v).await;
 
+        Ok(warp::reply::with_status(
+            "Fetching update.",
+            warp::http::StatusCode::OK,
+        ))
+    }
+
+    pub async fn update_shows(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+        let data_source_url = "https://spinitron.com/api/shows/?access-token=";
+        let access_token = match env::var("SPIN_KEY") {
+            Ok(v) => v,
+            Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
+        };
+
+        let count_url = "&count=2";
+        let data_source_url = data_source_url.to_owned() + &access_token + count_url;
+        info!("Sending a request to {}", data_source_url);
+        let resp = reqwest::get(data_source_url).await.unwrap();
+
+        let str = resp.text().await.unwrap();
+
+        let v: Value = serde_json::from_str(&str).unwrap();
+
+        // Store in db
+        let mut db = db.lock().await;
+        // Remove _links field
+        *db = remove_links(v).await;
 
         Ok(warp::reply::with_status(
             "Fetching update.",
@@ -126,7 +224,6 @@ mod handlers {
         let resp = db.clone();
         Ok(warp::reply::json(&resp))
     }
-
 }
 
 mod models {
@@ -152,13 +249,14 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn test_update() {
-        let db = models::blank_db();
-        let api = filters::routes(db.clone());
+    async fn test_spins_update() {
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
 
         let resp = request()
             .method("POST")
-            .path("/update")
+            .path("/spins/update")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .reply(&api)
             .await;
@@ -167,13 +265,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get() {
-        let db = models::blank_db();
-        let api = filters::routes(db.clone());
+    async fn test_spins_get() {
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
+
+        let resp = request().method("GET").path("/spins/get").reply(&api).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_shows_update() {
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
 
         let resp = request()
-            .method("GET")
-            .path("/get")
+            .method("POST")
+            .path("/shows/update")
+            .header("Content-Type", "application/x-www-form-urlencoded")
             .reply(&api)
             .await;
 
@@ -181,9 +292,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shows_get() {
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
+
+        let resp = request().method("GET").path("/shows/get").reply(&api).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_health_check() {
-        let db = models::blank_db();
-        let api = filters::routes(db.clone());
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
 
         let resp = request()
             .method("GET")
@@ -196,14 +319,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_not_found() {
-        let db = models::blank_db();
-        let api = filters::routes(db.clone());
+        let show_db = models::blank_db();
+        let spin_db = models::blank_db();
+        let api = filters::routes(spin_db.clone(), show_db.clone());
 
-        let resp = request()
-            .method("GET")
-            .path("/not-found")
-            .reply(&api)
-            .await;
+        let resp = request().method("GET").path("/not-found").reply(&api).await;
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
