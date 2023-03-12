@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use std::env;
 use pretty_env_logger;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -19,7 +20,14 @@ async fn main() {
 
     let api = filters::routes(spin_db, show_db);
 
-    warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
+    // If env var LOCAL is set, run on localhost
+    if env::var("LOCAL").is_ok() {
+        info!("Running on localhost");
+        warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
+    } else {
+        info!("Running exposed");
+        warp::serve(api).run(([0, 0, 0, 0], 80)).await;
+    }
 }
 
 async fn create_cron(show_db: models::Db) {
