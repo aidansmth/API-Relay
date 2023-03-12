@@ -19,7 +19,7 @@ async fn main() {
 
     let api = filters::routes(spin_db, show_db);
 
-    warp::serve(api).run(([0, 0, 0, 0], 80)).await;
+    warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
 }
 
 async fn create_cron(show_db: models::Db) {
@@ -29,11 +29,11 @@ let scheduler = JobScheduler::new().await;
 
     match scheduler {
         Ok(sched) => {
-            // create job
-            let job = Job::new_async("* 0 * * * *", move |_, _| {
+            // create job that refreshes show every 15 minutes
+            let job = Job::new_async("0 0,15,30,45 * * * *", move |_, _| {
                 let short_lived_db = show_db_clone.clone();
                 Box::pin(async {
-                    info!("Top of the hour, updating shows.");
+                    info!("{:?}: updating shows.", chrono::Utc::now());
                     let _ = handlers::update_shows(short_lived_db).await;
                 })
             });
@@ -148,7 +148,7 @@ mod handlers {
 
     use super::models::Db;
 
-    async fn remove_links(v: Value) -> Value {
+    async fn remove_links_shows(v: Value) -> Value {
         let mut new_v = Value::Object(serde_json::Map::new());
         let arr = v["items"].as_array().unwrap();
         for i in 0..arr.len() {
@@ -160,6 +160,18 @@ mod handlers {
                 }
             }
             new_v[i.to_string()] = new_iter;
+        }
+        debug!("new_v: {:?}", new_v);
+        new_v
+    }
+
+    async fn remove_links_djs(v: Value) -> Value {
+        let mut new_v = Value::Object(serde_json::Map::new());
+        let arr = v.as_object().unwrap();
+        for (key, value) in arr {
+            if key != "_links" {
+                new_v[key] = value.clone();
+            }
         }
         debug!("new_v: {:?}", new_v);
         new_v
@@ -184,7 +196,7 @@ mod handlers {
         // Store in db
         let mut db = db.lock().await;
         // Remove _links field
-        *db = remove_links(v).await;
+        *db = remove_links_shows(v).await;
 
         Ok(warp::reply::with_status(
             "Fetching update.",
@@ -206,12 +218,32 @@ mod handlers {
 
         let str = resp.text().await.unwrap();
 
-        let v: Value = serde_json::from_str(&str).unwrap();
+        let mut v: Value = serde_json::from_str(&str).unwrap();
+        
+        let dj1 = v["items"][0]["_links"]["personas"][0]["href"].as_str().unwrap();
+        let dj2 = v["items"][1]["_links"]["personas"][0]["href"].as_str().unwrap();
+
+        info!("DJ1: {}", dj1);
+        info!("DJ2: {}", dj2);
+        
+        // Fetch DJ info using reqwest
+        let dj1_data = reqwest::get(dj1).await.unwrap().text().await.unwrap();
+        let dj2_data = reqwest::get(dj2).await.unwrap().text().await.unwrap();
+
+        let dj1_data: Value = remove_links_djs(serde_json::from_str(&dj1_data).unwrap()).await;
+        let dj2_data: Value = remove_links_djs(serde_json::from_str(&dj2_data).unwrap()).await;
+
+        // Remove links
+
+        let mut new_v = remove_links_shows(v).await;
+
+        new_v["dj_0"] = dj1_data;
+        new_v["dj_1"] = dj2_data;
 
         // Store in db
         let mut db = db.lock().await;
         // Remove _links field
-        *db = remove_links(v).await;
+        *db = new_v;
 
         Ok(warp::reply::with_status(
             "Fetching update.",
