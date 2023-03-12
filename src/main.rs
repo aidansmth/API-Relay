@@ -1,9 +1,16 @@
 #[macro_use]
 extern crate log;
 
-use std::env;
-use pretty_env_logger;
+use std::{
+    collections::HashMap,
+    env,
+    sync::{Arc, Mutex},
+};
 use tokio_cron_scheduler::{Job, JobScheduler};
+
+use handlers::Message;
+use tokio::sync::mpsc::UnboundedSender;
+use warp::Filter;
 
 #[tokio::main]
 async fn main() {
@@ -12,13 +19,27 @@ async fn main() {
     let spin_db = models::blank_db();
     let show_db = models::blank_db();
 
-    _ = handlers::update_spins(spin_db.clone()).await;
-    _ = handlers::update_shows(show_db.clone()).await;
-
     // Create cron job to update shows every hour
     let _ = create_cron(show_db.clone()).await;
 
-    let api = filters::routes(spin_db, show_db);
+    let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    _ = handlers::update_spins(spin_db.clone()).await;
+    _ = handlers::update_shows(show_db.clone()).await;
+
+    let for_closure = connected_users.clone();
+    let connected_users_filter = warp::any().map(move || for_closure.clone());
+
+    let spin_recv = warp::path!("spins" / "stream")
+        .and(warp::get())
+        .and(connected_users_filter)
+        .map(|connected_users_filter| {
+            let stream = handlers::user_connected(connected_users_filter);
+            warp::sse::reply(warp::sse::keep_alive().stream(stream))
+        });
+
+    let api = spin_recv.or(filters::routes(spin_db, show_db, connected_users.clone()));
 
     // If env var LOCAL is set, run on localhost
     if env::var("LOCAL").is_ok() {
@@ -31,7 +52,7 @@ async fn main() {
 }
 
 async fn create_cron(show_db: models::Db) {
-let scheduler = JobScheduler::new().await;
+    let scheduler = JobScheduler::new().await;
 
     let show_db_clone = show_db.clone();
 
@@ -47,23 +68,21 @@ let scheduler = JobScheduler::new().await;
             });
             // add job to scheduler
             match job {
-                Ok(job) => {
-                    match sched.add(job).await {
-                        Ok(_) => {
-                            info!("Job added to scheduler");
-                        }
-                        Err(e) => {
-                            error!("Error: {}", e);
-                        }
+                Ok(job) => match sched.add(job).await {
+                    Ok(_) => {
+                        info!("Job added to scheduler");
                     }
-                }
+                    Err(e) => {
+                        error!("Error: {}", e);
+                    }
+                },
                 Err(e) => {
                     error!("Error: {}", e);
                 }
             }
             // start scheduler
             let _ = sched.start().await;
-        },
+        }
         Err(e) => {
             error!("Error: {}", e);
         }
@@ -71,15 +90,21 @@ let scheduler = JobScheduler::new().await;
 }
 
 mod filters {
+    use std::convert::Infallible;
+    use std::sync::Arc;
+
     use super::handlers;
     use super::models::Db;
+    use serde_json::Value;
+    use tokio::sync::Mutex;
     use warp::Filter;
 
     pub fn routes(
         spin_db: Db,
         show_db: Db,
+        users: handlers::Users,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        spin_update(spin_db.clone())
+        spin_update(spin_db.clone(), users.clone())
             .or(get_spin(spin_db.clone()))
             .or(show_update(show_db.clone()))
             .or(get_show(show_db.clone()))
@@ -87,15 +112,28 @@ mod filters {
             .or(not_found())
     }
 
+    use warp::Reply;
+
     // Update methods
     pub fn spin_update(
         spin_db: Db,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        users: handlers::Users,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone{
         warp::path!("spins" / "update")
             .and(warp::post())
             .and(is_form_content())
-            .and(with_db(spin_db))
-            .and_then(handlers::update_spins)
+            // .and(with_db(spin_db))
+            .and(with_db_and_users(spin_db, users))
+            .and_then(
+                |(db, users): (Arc<Mutex<Value>>, handlers::Users)| async move {
+                    let _ = handlers::update_spins_no_reply(db.clone()).await;
+                    let _ = handlers::send_update(users.clone());
+                    // Must satisfy return type
+                    Ok::<_, Infallible>(
+                        warp::reply::with_status("OK", warp::http::StatusCode::OK).into_response(),
+                    )
+                },
+            )
     }
 
     pub fn show_update(
@@ -144,15 +182,36 @@ mod filters {
         warp::any().map(move || db.clone())
     }
 
+    fn with_db_and_users(
+        db: Db,
+        users: handlers::Users,
+    ) -> impl Filter<Extract = ((Db, handlers::Users),), Error = std::convert::Infallible> + Clone
+    {
+        warp::any().map(move || (db.clone(), users.clone()))
+    }
+
     fn is_form_content() -> impl Filter<Extract = (), Error = warp::Rejection> + Copy {
         warp::header::exact_ignore_case("Content-Type", "application/x-www-form-urlencoded")
     }
 }
 mod handlers {
-    use std::env;
+    use std::{
+        collections::HashMap,
+        env,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
 
+    use futures_util::Stream;
     use log::{debug, info};
     use serde_json::Value;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+    use warp::sse::Event;
+
+    use futures_util::stream::StreamExt;
 
     use super::models::Db;
 
@@ -183,6 +242,27 @@ mod handlers {
         }
         debug!("new_v: {:?}", new_v);
         new_v
+    }
+
+    pub async fn update_spins_no_reply(db: Db) {
+        let data_source_url = "https://spinitron.com/api/spins/?access-token=";
+        let access_token = match env::var("SPIN_KEY") {
+            Ok(v) => v,
+            Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
+        };
+
+        let count_url = "&count=5";
+        let data_source_url = data_source_url.to_owned() + &access_token + count_url;
+        info!("Sending a request to {}", data_source_url);
+        let resp = reqwest::get(data_source_url).await.unwrap();
+
+        let str = resp.text().await.unwrap();
+
+        let v: Value = serde_json::from_str(&str).unwrap();
+
+        // Store in db
+        let mut db = db.lock().await;
+        *db = remove_links_shows(v).await;
     }
 
     pub async fn update_spins(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
@@ -226,14 +306,18 @@ mod handlers {
 
         let str = resp.text().await.unwrap();
 
-        let mut v: Value = serde_json::from_str(&str).unwrap();
-        
-        let dj1 = v["items"][0]["_links"]["personas"][0]["href"].as_str().unwrap();
-        let dj2 = v["items"][1]["_links"]["personas"][0]["href"].as_str().unwrap();
+        let v: Value = serde_json::from_str(&str).unwrap();
+
+        let dj1 = v["items"][0]["_links"]["personas"][0]["href"]
+            .as_str()
+            .unwrap();
+        let dj2 = v["items"][1]["_links"]["personas"][0]["href"]
+            .as_str()
+            .unwrap();
 
         info!("DJ1: {}", dj1);
         info!("DJ2: {}", dj2);
-        
+
         // Fetch DJ info using reqwest
         let dj1_data = reqwest::get(dj1).await.unwrap().text().await.unwrap();
         let dj2_data = reqwest::get(dj2).await.unwrap().text().await.unwrap();
@@ -264,6 +348,54 @@ mod handlers {
         let resp = db.clone();
         Ok(warp::reply::json(&resp))
     }
+
+    pub(crate) type Users = Arc<Mutex<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
+    static NEXT_USER_ID: std::sync::atomic::AtomicUsize = AtomicUsize::new(1);
+
+    #[derive(Debug)]
+    pub enum Message {
+        UserId(usize),
+        Reply(String),
+    }
+
+    #[derive(Debug)]
+    struct NotUtf8;
+    impl warp::reject::Reject for NotUtf8 {}
+
+    pub(crate) fn user_connected(
+        users: Users,
+    ) -> impl Stream<Item = Result<Event, warp::Error>> + Send + 'static {
+        let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
+
+        eprintln!("new chat user: {}", my_id);
+
+        // Use an unbounded channel to handle buffering and flushing of messages
+        // to the event source...
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rx = UnboundedReceiverStream::new(rx);
+
+        tx.send(Message::UserId(my_id))
+            // rx is right above, so this cannot fail
+            .unwrap();
+
+        // Save the sender in our list of connected users.
+        users.lock().unwrap().insert(my_id, tx);
+
+        // Convert messages into Server-Sent Events and return resulting stream.
+        rx.map(|msg| match msg {
+            Message::UserId(_my_id) => Ok(Event::default()
+                .event("user")
+                .data("Connected.".to_string())),
+            Message::Reply(reply) => Ok(Event::default().data(reply)),
+        })
+    }
+
+    pub(crate) fn send_update(users: Users) {
+        users.lock().unwrap().retain(|_uid, tx| {
+            tx.send(Message::Reply("Spin outdated - Update needed.".to_string()))
+                .is_ok()
+        });
+    }
 }
 
 mod models {
@@ -280,19 +412,27 @@ mod models {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    use tokio::sync::mpsc::UnboundedSender;
     use warp::http::StatusCode;
     use warp::test::request;
 
-    use super::{
-        filters,
-        models::{self, Db},
-    };
+    use crate::handlers::Message;
+
+    use super::{filters, models};
 
     #[tokio::test]
     async fn test_spins_update() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request()
             .method("POST")
@@ -308,7 +448,9 @@ mod tests {
     async fn test_spins_get() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request().method("GET").path("/spins/get").reply(&api).await;
 
@@ -319,7 +461,9 @@ mod tests {
     async fn test_shows_update() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request()
             .method("POST")
@@ -335,7 +479,9 @@ mod tests {
     async fn test_shows_get() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request().method("GET").path("/shows/get").reply(&api).await;
 
@@ -346,7 +492,9 @@ mod tests {
     async fn test_health_check() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request()
             .method("GET")
@@ -361,7 +509,9 @@ mod tests {
     async fn test_not_found() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
-        let api = filters::routes(spin_db.clone(), show_db.clone());
+        let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let api = filters::routes(spin_db.clone(), show_db.clone(), connected_users.clone());
 
         let resp = request().method("GET").path("/not-found").reply(&api).await;
 
