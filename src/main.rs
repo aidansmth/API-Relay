@@ -25,7 +25,7 @@ async fn main() {
     let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    _ = handlers::update_spins(spin_db.clone()).await;
+    _ = handlers::update_spins_no_reply(spin_db.clone()).await;
     _ = handlers::update_shows(show_db.clone()).await;
 
     let for_closure = connected_users.clone();
@@ -37,7 +37,8 @@ async fn main() {
         .map(|connected_users_filter| {
             let stream = handlers::user_connected(connected_users_filter);
             warp::sse::reply(warp::sse::keep_alive().stream(stream))
-        });
+        })
+        .with(warp::reply::with::headers(headers::cors()));
 
     let api = spin_recv.or(filters::routes(spin_db, show_db, connected_users.clone()));
 
@@ -93,6 +94,8 @@ mod filters {
     use std::convert::Infallible;
     use std::sync::Arc;
 
+    use crate::headers;
+
     use super::handlers;
     use super::models::Db;
     use serde_json::Value;
@@ -126,7 +129,19 @@ mod filters {
             .and(with_db_and_users(spin_db, users))
             .and_then(
                 |(db, users): (Arc<Mutex<Value>>, handlers::Users)| async move {
-                    let _ = handlers::update_spins_no_reply(db.clone()).await;
+                    let resp = handlers::update_spins_no_reply(db.clone()).await;
+                    match resp {
+                        Ok(_) => {
+                            trace!("Spins updated");
+                        }
+                        Err(e) => {
+                            error!("Error fetching spins.");
+                            return Ok::<_, Infallible>(
+                                warp::reply::with_status("Error", warp::http::StatusCode::INTERNAL_SERVER_ERROR)
+                                    .into_response(),
+                            );
+                        }
+                    }
                     let _ = handlers::send_update(users.clone());
                     // Must satisfy return type
                     Ok::<_, Infallible>(
@@ -154,6 +169,7 @@ mod filters {
             .and(warp::get())
             .and(with_db(spin_db))
             .and_then(handlers::get)
+            .with(warp::reply::with::headers(headers::cors()))
     }
 
     pub fn get_show(
@@ -163,6 +179,7 @@ mod filters {
             .and(warp::get())
             .and(with_db(show_db))
             .and_then(handlers::get)
+            .with(warp::reply::with::headers(headers::cors()))
     }
 
     pub fn health_check() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
@@ -206,14 +223,31 @@ mod handlers {
 
     use futures_util::Stream;
     use log::{debug, info};
-    use serde_json::Value;
+    use serde_json::{Value, Map};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
-    use warp::sse::Event;
+    use warp::{sse::Event, Reply};
 
     use futures_util::stream::StreamExt;
 
     use super::models::Db;
+
+    async fn remove_links_spins(v: Value) -> Value {
+        let mut new_v = Value::Object(serde_json::Map::new());
+        let arr = v["items"].as_array().unwrap();
+        for i in 0..arr.len() {
+            let iter = arr[i].as_object().unwrap();
+            let mut new_iter = Value::Object(serde_json::Map::new());
+            for (key, value) in iter {
+                if key != "_links" {
+                    new_iter[key] = value.clone();
+                }
+            }
+            new_v["spin-".to_string() + &i.to_string()] = new_iter;
+        }
+        debug!("new_v: {:?}", new_v);
+        new_v
+    }
 
     async fn remove_links_shows(v: Value) -> Value {
         let mut new_v = Value::Object(serde_json::Map::new());
@@ -226,7 +260,7 @@ mod handlers {
                     new_iter[key] = value.clone();
                 }
             }
-            new_v[i.to_string()] = new_iter;
+            new_v["show-".to_string() + &i.to_string()] = new_iter;
         }
         debug!("new_v: {:?}", new_v);
         new_v
@@ -244,7 +278,8 @@ mod handlers {
         new_v
     }
 
-    pub async fn update_spins_no_reply(db: Db) {
+    pub async fn update_spins_no_reply(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
+        info!("POST recieved from Spinitron, updating spins");
         let data_source_url = "https://spinitron.com/api/spins/?access-token=";
         let access_token = match env::var("SPIN_KEY") {
             Ok(v) => v,
@@ -253,43 +288,34 @@ mod handlers {
 
         let count_url = "&count=5";
         let data_source_url = data_source_url.to_owned() + &access_token + count_url;
-        info!("Sending a request to {}", data_source_url);
-        let resp = reqwest::get(data_source_url).await.unwrap();
 
-        let str = resp.text().await.unwrap();
+        trace!("Sending a request to {}", data_source_url);
 
-        let v: Value = serde_json::from_str(&str).unwrap();
+        let resp = reqwest::get(data_source_url).await;
+        let resp_str;
+        
+        match resp {
+            Err(e) => {
+                error!("Couldn't update spins: {}", e);
+                return Ok(warp::reply::with_status("Couldn't fetch spins.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+            }
+            Ok(v) => resp_str = v,
+        }
 
-        // Store in db
-        let mut db = db.lock().await;
-        *db = remove_links_shows(v).await;
-    }
 
-    pub async fn update_spins(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
-        let data_source_url = "https://spinitron.com/api/spins/?access-token=";
-        let access_token = match env::var("SPIN_KEY") {
-            Ok(v) => v,
-            Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
-        };
+        let str = resp_str.text().await.unwrap();
 
-        let count_url = "&count=5";
-        let data_source_url = data_source_url.to_owned() + &access_token + count_url;
-        info!("Sending a request to {}", data_source_url);
-        let resp = reqwest::get(data_source_url).await.unwrap();
-
-        let str = resp.text().await.unwrap();
+        // If str is empty, return
+        if str == "" {
+            return Ok(warp::reply::with_status("Response was empty.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+        }
 
         let v: Value = serde_json::from_str(&str).unwrap();
 
         // Store in db
         let mut db = db.lock().await;
-        // Remove _links field
-        *db = remove_links_shows(v).await;
-
-        Ok(warp::reply::with_status(
-            "Fetching update.",
-            warp::http::StatusCode::OK,
-        ))
+        *db = remove_links_spins(v).await;
+        return Ok(warp::reply::with_status("Finished updating spins.", warp::http::StatusCode::OK));
     }
 
     pub async fn update_shows(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
@@ -301,10 +327,24 @@ mod handlers {
 
         let count_url = "&count=2";
         let data_source_url = data_source_url.to_owned() + &access_token + count_url;
-        info!("Sending a request to {}", data_source_url);
-        let resp = reqwest::get(data_source_url).await.unwrap();
+        trace!("Sending a request to {}", data_source_url);
+        let resp = reqwest::get(data_source_url).await;
+        let resp_str;
+        
+        match resp {
+            Err(e) => {
+                error!("Couldn't get shows: {}", e);
+                return Ok(warp::reply::with_status("Couldn't fetch shows.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+            }
+            Ok(v) => resp_str = v,
+        }
 
-        let str = resp.text().await.unwrap();
+        let str = resp_str.text().await.unwrap();
+
+        // If str is empty, return
+        if str == "" {
+            return Ok(warp::reply::with_status("Response was empty.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+        }
 
         let v: Value = serde_json::from_str(&str).unwrap();
 
@@ -315,22 +355,35 @@ mod handlers {
             .as_str()
             .unwrap();
 
-        info!("DJ1: {}", dj1);
-        info!("DJ2: {}", dj2);
-
         // Fetch DJ info using reqwest
-        let dj1_data = reqwest::get(dj1).await.unwrap().text().await.unwrap();
-        let dj2_data = reqwest::get(dj2).await.unwrap().text().await.unwrap();
+        let dj1_data = reqwest::get(dj1).await.unwrap().text().await;
+        let dj2_data = reqwest::get(dj2).await.unwrap().text().await;
+
+        // match both djs, unwraping or returning error
+        let dj1_data = match dj1_data {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Couldn't get dj1_data: {}", e);
+                return Err(warp::reject::not_found());
+            }
+        };
+
+        let dj2_data = match dj2_data {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Couldn't get dj2_data: {}", e);
+                return Err(warp::reject::not_found());
+            }
+        };
 
         let dj1_data: Value = remove_links_djs(serde_json::from_str(&dj1_data).unwrap()).await;
         let dj2_data: Value = remove_links_djs(serde_json::from_str(&dj2_data).unwrap()).await;
 
         // Remove links
-
         let mut new_v = remove_links_shows(v).await;
 
-        new_v["dj_0"] = dj1_data;
-        new_v["dj_1"] = dj2_data;
+        new_v["dj-0"] = dj1_data;
+        new_v["dj-1"] = dj2_data;
 
         // Store in db
         let mut db = db.lock().await;
@@ -338,7 +391,7 @@ mod handlers {
         *db = new_v;
 
         Ok(warp::reply::with_status(
-            "Fetching update.",
+            "Finished updating shows and DJs.",
             warp::http::StatusCode::OK,
         ))
     }
@@ -346,7 +399,19 @@ mod handlers {
     pub async fn get(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
         let db = db.lock().await;
         let resp = db.clone();
-        Ok(warp::reply::json(&resp))
+        if resp == Value::Null {
+            // Create json object with 500 error and return
+            let mut resp = Map::new();
+            resp.insert("error".to_string(), Value::String("500".to_string()));
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&resp),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+        Ok(warp::reply::with_status(
+            warp::reply::json(&resp),
+            warp::http::StatusCode::OK,
+        ))
     }
 
     pub(crate) type Users = Arc<Mutex<HashMap<usize, mpsc::UnboundedSender<Message>>>>;
@@ -366,8 +431,6 @@ mod handlers {
         users: Users,
     ) -> impl Stream<Item = Result<Event, warp::Error>> + Send + 'static {
         let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
-
-        eprintln!("new chat user: {}", my_id);
 
         // Use an unbounded channel to handle buffering and flushing of messages
         // to the event source...
@@ -395,6 +458,28 @@ mod handlers {
             tx.send(Message::Reply("Spin outdated - Update needed.".to_string()))
                 .is_ok()
         });
+    }
+}
+
+mod headers {
+    use warp::http::header::{HeaderMap, HeaderValue};
+
+    // create headers to be used in responses
+    pub fn cors() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Access-Control-Allow-Origin",
+            HeaderValue::from_static("*"),
+        );
+        headers.insert(
+            "Access-Control-Allow-Methods",
+            HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            "Access-Control-Allow-Headers",
+            HeaderValue::from_static("Content-Type, Authorization"),
+        );
+        headers
     }
 }
 
