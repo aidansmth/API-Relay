@@ -60,7 +60,7 @@ async fn create_cron(show_db: models::Db) {
     match scheduler {
         Ok(sched) => {
             // create job that refreshes show every 15 minutes
-            let job = Job::new_async("0 0,15,30,45 * * * *", move |_, _| {
+            let job = Job::new_async("1 0,15,30,45 * * * *", move |_, _| {
                 let short_lived_db = show_db_clone.clone();
                 Box::pin(async {
                     info!("{:?}: updating shows.", chrono::Utc::now());
