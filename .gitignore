@@ -2,3 +2,6 @@
 .DS_Store
 .env
 .locust/__pycache__/
+key.rsa
+cert.pem
+/log

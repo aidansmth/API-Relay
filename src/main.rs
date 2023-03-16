@@ -12,9 +12,31 @@ use handlers::Message;
 use tokio::sync::mpsc::UnboundedSender;
 use warp::Filter;
 
+
+use log::LevelFilter;
+use log4rs::append::file::FileAppender;
+use log4rs::encode::pattern::PatternEncoder;
+use log4rs::config::{Appender, Config, Root};
+
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+        .build("log/output.log").unwrap();
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder()
+                   .appender("logfile")
+                   .build(LevelFilter::Info)).unwrap();
+
+    log4rs::init_config(config).unwrap();
+
+    log::info!("Hello, world!");
+
+
+    // pretty_env_logger::init();
 
     let spin_db = models::blank_db();
     let show_db = models::blank_db();
@@ -226,7 +248,7 @@ mod handlers {
     use serde_json::{Value, Map};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
-    use warp::{sse::Event, Reply};
+    use warp::{sse::Event};
 
     use futures_util::stream::StreamExt;
 
