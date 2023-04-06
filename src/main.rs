@@ -35,7 +35,6 @@ async fn main() {
 
     log::info!("Hello, world!");
 
-
     // pretty_env_logger::init();
 
     let spin_db = models::blank_db();
@@ -308,7 +307,7 @@ mod handlers {
             Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
         };
 
-        let count_url = "&count=5";
+        let count_url = "&count=10";
         let data_source_url = data_source_url.to_owned() + &access_token + count_url;
 
         trace!("Sending a request to {}", data_source_url);
