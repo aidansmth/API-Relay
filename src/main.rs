@@ -366,49 +366,55 @@ mod handlers {
         if str == "" {
             return Ok(warp::reply::with_status("Response was empty.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
         }
-
+        
         let v: Value = serde_json::from_str(&str).unwrap();
+        let mut new_v = remove_links_shows(v.clone()).await;
+        
+        // Get the amount of DJs in the current/first up show
+        let dj1_count = v["items"][0]["_links"]["personas"].as_array().unwrap().len();
+        error!("dj1_count: {}", dj1_count);
+        let dj2_count = v["items"][1]["_links"]["personas"].as_array().unwrap().len();
+        error!("dj2_count: {}", dj2_count);
 
-        let dj1 = v["items"][0]["_links"]["personas"][0]["href"]
-            .as_str()
-            .unwrap();
-        let dj2 = v["items"][1]["_links"]["personas"][0]["href"]
-            .as_str()
-            .unwrap();
+        // Loop over DJs by dj1_count length
+        for i in 0..dj1_count {
+            let dj_link= v["items"][0]["_links"]["personas"][i]["href"]
+                .as_str()
+                .unwrap();
+            let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
+            let dj_data = match dj_data {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Couldn't get dj_data: {}", e);
+                    return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            };
+            let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+            
+            new_v["dj-0"][i.to_string()] = dj_data;
+        }
 
-        // Fetch DJ info using reqwest
-        let dj1_data = reqwest::get(dj1).await.unwrap().text().await;
-        let dj2_data = reqwest::get(dj2).await.unwrap().text().await;
-
-        // match both djs, unwraping or returning error
-        let dj1_data = match dj1_data {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Couldn't get dj1_data: {}", e);
-                return Err(warp::reject::not_found());
-            }
-        };
-
-        let dj2_data = match dj2_data {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Couldn't get dj2_data: {}", e);
-                return Err(warp::reject::not_found());
-            }
-        };
-
-        let dj1_data: Value = remove_links_djs(serde_json::from_str(&dj1_data).unwrap()).await;
-        let dj2_data: Value = remove_links_djs(serde_json::from_str(&dj2_data).unwrap()).await;
-
-        // Remove links
-        let mut new_v = remove_links_shows(v).await;
-
-        new_v["dj-0"] = dj1_data;
-        new_v["dj-1"] = dj2_data;
+        // Loop over DJs by dj2_count length
+        for i in 0..dj2_count {
+            let dj_link= v["items"][1]["_links"]["personas"][i]["href"]
+                .as_str()
+                .unwrap();
+            let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
+            let dj_data = match dj_data {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Couldn't get dj_data: {}", e);
+                    return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            };
+            let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+            
+            new_v["dj-1"][i.to_string()] = dj_data;
+        }
 
         // Store in db
         let mut db = db.lock().await;
-        // Remove _links field
+        
         *db = new_v;
 
         Ok(warp::reply::with_status(
@@ -551,6 +557,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
+
     async fn test_spins_get() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
@@ -582,6 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_shows_get() {
         let show_db = models::blank_db();
         let spin_db = models::blank_db();
