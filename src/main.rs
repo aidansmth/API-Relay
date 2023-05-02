@@ -381,6 +381,19 @@ mod handlers {
             let dj_link= v["items"][0]["_links"]["personas"][i]["href"]
                 .as_str()
                 .unwrap();
+            if i == 0 {
+                let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
+                let dj_data = match dj_data {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("Couldn't get dj_data: {}", e);
+                        return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                    }
+                };
+                let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+                
+                new_v["dj-0"] = dj_data;
+            }
             let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
             let dj_data = match dj_data {
                 Ok(v) => v,
@@ -391,7 +404,7 @@ mod handlers {
             };
             let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
             
-            new_v["dj-0"][i.to_string()] = dj_data;
+            new_v["v2"]["dj-0"][i.to_string()] = dj_data;
         }
 
         // Loop over DJs by dj2_count length
@@ -399,6 +412,19 @@ mod handlers {
             let dj_link= v["items"][1]["_links"]["personas"][i]["href"]
                 .as_str()
                 .unwrap();
+            if i == 0 {
+                let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
+                let dj_data = match dj_data {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("Couldn't get dj_data: {}", e);
+                        return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                    }
+                };
+                let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+                
+                new_v["dj-1"] = dj_data;
+            }
             let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
             let dj_data = match dj_data {
                 Ok(v) => v,
@@ -409,7 +435,7 @@ mod handlers {
             };
             let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
             
-            new_v["dj-1"][i.to_string()] = dj_data;
+            new_v["v2"]["dj-1"][i.to_string()] = dj_data;
         }
 
         // Store in db
