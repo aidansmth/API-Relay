@@ -16,6 +16,7 @@ RUN cargo build --release
 
 # now copy the code over
 COPY src src
+COPY .env .
 
 # build the release
 RUN cargo install --offline --path .
