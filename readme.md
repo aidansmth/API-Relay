@@ -2,11 +2,21 @@
 ## Overview
 When run on a server and linked with a radio station's Spinitron, this server will provide a REST API for accessing the station's Spinitron data without exposing a private API key. Once up and running, you can make GET requests to the server to get the station's current spins, shows, and DJ info. 
 
-This server caches the data it gets from Spinitron, which is useful for applications that need to make frequent requests, such as a station website. Additionally, the server provides a server-sent event (SSE) endpoint `/spins/stream/` that can inform clients when a new spin is logged instead of clients having to continually poll the server for new spins.
+This server caches the data it gets from Spinitron, which is useful for applications that need to make frequent requests, such as a station website. Additionally, this relay server provides a server-sent event (SSE) endpoint that can inform clients when a new spin is logged instead of clients having to continually poll the server for new spins.
 
 This project is built with Rust and Warp. It pretty stable and relatively efficient. It's been load-tested up to 20k requests per second with no issues, which should be enough for most small stations.
 
 This was originally built as a student project for KSCU 103.3 FM out of Santa Clara University, check us out [here](https://kscu.org).
+
+## Endpoints
+
+| Endpoint | Details |
+| :--- | :--- |
+| `spins/get` | Returns the ten most recent tracks logged in Spinitron.
+| `spins/stream` | An [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) stream that clients can connect to. Will send the message `Spin outdated - Update needed.` when new data should be fetched. Can be used with `spins/get` to keep spin data updated.
+| `spins/update` | Forces relay server to fetch new spin data from Spinitron. Must contain an Request Header `Content Type` of `application/x-www-form-urlencoded`.
+| `shows/get` | Returns either the current show and next upcoming show or, if no show is live, next two upcoming shows.
+| `shows/update` | Forces relay server to fetch new show data from Spinitron. Must contain an Request Header `Content Type` of `application/x-www-form-urlencoded`.
 
 ## Installation
 1. Install Rust and Cargo. You can find instructions [here](https://www.rust-lang.org/tools/install).
@@ -17,7 +27,7 @@ git clone https://github.com/aidansmth/API_relay.git
 cd API_relay
 ```
 
-3. Create and edit a `.env` file in the root directory of the project. This file will contain your station's Spinitron API key.
+3. Create and edit a `.env` file in the root directory of the project. This file will contain your station's Spinitron API key which is required. You can find this by logging into Spinitron as an administrator and navigating to `Admin > Control Panel`.
 ```
 SPINITRON_API_KEY=your_api_key
 ```
@@ -80,7 +90,7 @@ git archive --add-file .env --format=zip HEAD -o ./target/repo.zip
 7. Once launched and the health status is listed as healthly, you can access your server using it's web address (should resemble `*.[aws-region].elasticbeanstalk.com/`). The easiest endpoint to test is `http://[your server's web address]/spins/get`.
 
 ## Configuring HTTPS and Routing
-This is recommended for advanced users only, but is likely needed if you're making  a program here requests to the API Relay are made client side, such as a station website.
+This is recommended for advanced users only, but may be required if you're making  a program where requests to the API Relay are made client side, such as a radio station website.
 
 1. Route a custom domain or subdomain through AWS Route 53.
 
@@ -90,11 +100,11 @@ This is recommended for advanced users only, but is likely needed if you're maki
 
 4. Configure HTTP and HTTPS forwarding rules. Your load balancer should accept both HTTP and HTTPS, but only forward all requests to your Elastic Beanstalk instance as HTTP.
 
-5. Test by requesting spin data using HTTPS, such as `https://[your custom domain]/spins/get`
+5. Test by requesting spin data using HTTPS, such as `https://[your custom domain]/spins/get`.
 
 ## Limitations
 - `/spins/get` only returns the last ten logged spins.
-- `/shows/get` returns either the current show and next upcoming show or, if no show is live, two upcoming shows.
+- `/shows/get` returns either the current show and next upcoming show or, if no show is live, next two upcoming shows.
 - Show info is only updated every fifteen minutes at minute 0, 15, 30, & 45 of each hour. If you update a live or upcoming show within Spinitron, use the `/shows/update` endpoint to force the server to update.
 - As show info is fetched at the top of the hour, it can take a second or two to update on the server. It's safe to fetch new show data three seconds after the top of the hour.
 
