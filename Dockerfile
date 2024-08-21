@@ -1,5 +1,5 @@
 # select a starting image to build off
-FROM rust as build
+FROM rust AS build
 
 # set our working directory in the container as /repo
 WORKDIR /repo
