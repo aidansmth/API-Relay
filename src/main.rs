@@ -33,14 +33,12 @@ async fn main() {
 
     log4rs::init_config(config).unwrap();
 
-    log::info!("Hello, world!");
-
-    // pretty_env_logger::init();
+    log::info!("Starting API-Relay...");
 
     let spin_db = models::blank_db();
     let show_db = models::blank_db();
 
-    // Create cron job to update shows every hour
+    // Create cron job to update shows on the 0,15,30,45th minutes of each hour
     let _ = create_cron(show_db.clone()).await;
 
     let connected_users: Arc<Mutex<HashMap<usize, UnboundedSender<Message>>>> =
@@ -65,7 +63,7 @@ async fn main() {
 
     // If env var LOCAL is set, run on localhost
     if env::var("LOCAL").is_ok() {
-        info!("Running on localhost");
+        info!("Running on localhost port 8080");
         warp::serve(api).run(([127, 0, 0, 1], 8080)).await;
     } else {
         info!("Running exposed");
@@ -84,7 +82,7 @@ async fn create_cron(show_db: models::Db) {
             let job = Job::new_async("1 0,15,30,45 * * * *", move |_, _| {
                 let short_lived_db = show_db_clone.clone();
                 Box::pin(async {
-                    info!("{:?}: updating shows.", chrono::Utc::now());
+                    info!("{:?}: Fetching shows.", chrono::Utc::now());
                     let _ = handlers::update_shows(short_lived_db).await;
                 })
             });
@@ -92,7 +90,7 @@ async fn create_cron(show_db: models::Db) {
             match job {
                 Ok(job) => match sched.add(job).await {
                     Ok(_) => {
-                        info!("Job added to scheduler");
+                        info!("Job added to scheduler.");
                     }
                     Err(e) => {
                         error!("Error: {}", e);
@@ -156,7 +154,7 @@ mod filters {
                             trace!("Spins updated");
                         }
                         Err(e) => {
-                            error!("Error fetching spins.");
+                            error!("Error fetching:{:?}", e);
                             return Ok::<_, Infallible>(
                                 warp::reply::with_status("Error", warp::http::StatusCode::INTERNAL_SERVER_ERROR)
                                     .into_response(),
@@ -372,9 +370,7 @@ mod handlers {
         
         // Get the amount of DJs in the current/first up show
         let dj1_count = v["items"][0]["_links"]["personas"].as_array().unwrap().len();
-        error!("dj1_count: {}", dj1_count);
         let dj2_count = v["items"][1]["_links"]["personas"].as_array().unwrap().len();
-        error!("dj2_count: {}", dj2_count);
 
         // Loop over DJs by dj1_count length
         for i in 0..dj1_count {
@@ -476,9 +472,9 @@ mod handlers {
         Reply(String),
     }
 
-    #[derive(Debug)]
-    struct NotUtf8;
-    impl warp::reject::Reject for NotUtf8 {}
+    // #[derive(Debug)]
+    // struct NotUtf8;
+    // impl warp::reject::Reject for NotUtf8 {}
 
     pub(crate) fn user_connected(
         users: Users,
