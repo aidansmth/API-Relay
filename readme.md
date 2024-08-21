@@ -2,11 +2,11 @@
 ## Overview
 When run on a server and linked with a radio station's Spinitron, this server will provide a REST API for accessing the station's Spinitron data without exposing a private API key. Once up and running, you can make GET requests to the server to get the station's current spins, shows, and DJ info. 
 
-This server caches the data it gets from Spinitron, which is useful for applications that need to make frequent requests, such as a station website. Additionally, this relay server provides a server-sent event (SSE) endpoint that can inform clients when a new spin is logged instead of clients having to continually poll the server for new spins.
+This server caches the data it gets from Spinitron, which is useful for applications that need to make frequent requests, such as a station website. It uses Spinitron's metadata push feature to make minimal requests while keeping spin data current. Additionally, this relay server provides a server-sent event (SSE) endpoint that can inform web clients when a new spin is logged instead of having to continually poll the server for new spins.
 
-This project is built with Rust and Warp. It pretty stable and relatively efficient. It's been load-tested up to 20k requests per second with no issues, which should be enough for most small stations.
+This project is built with Rust and Warp. It's stable and quite efficient. It's been load-tested up to 20k requests per second with no issues, which should be enough for most stations.
 
-This was originally built as a student project for KSCU 103.3 FM out of Santa Clara University, check us out [here](https://kscu.org).
+This was originally built as a project for KSCU 103.3 FM out of Santa Clara University, check us out [here](https://kscu.org).
 
 ## Endpoints
 
@@ -18,25 +18,19 @@ This was originally built as a student project for KSCU 103.3 FM out of Santa Cl
 | `shows/get` | Returns either the current show and next upcoming show or, if no show is live, next two upcoming shows.
 | `shows/update` | Forces relay server to fetch new show data from Spinitron. Must contain an Request Header `Content Type` of `application/x-www-form-urlencoded`.
 
-## Installation
+## Local Installation
+
 1. Install Rust and Cargo. You can find instructions [here](https://www.rust-lang.org/tools/install).
 
 2. Clone this repository and navigate to it.
 ```
 git clone https://github.com/aidansmth/API_relay.git
-cd API_relay
+cd API_relay`
 ```
 
-3. Create and edit a `.env` file in the root directory of the project. This file will contain your station's Spinitron API key which is required. You can find this by logging into Spinitron as an administrator and navigating to `Admin > Control Panel`.
-```
-SPINITRON_API_KEY=your_api_key
-```
+3. Find your Spinitron API key by logging in as an administrator and navigating to `Admin > Automation and API`. Add the the API key as an environmental variable to your current shell instance with `export SPIN_KEY=your_api_key`.
 
-## Running Locally
-From the root of the project, run the file using the line below. _Please note that spins will not update automatically unless run externally and configured with Spinitron below._
-```
-LOCAL=OK cargo run
-```
+4. From the root of the project, run the program with `LOCAL=OK cargo run`. The endpoints will be avaliable at `localhost:8080`. _Please note that spins will not update automatically unless run externally and configured with Spinitron below._
 
 ## Running on a Server
 The following instructions create an instance of the API Relay Server hosted on AWS. For other hosts or to host the server yourself, different containerization schemes may apply.
