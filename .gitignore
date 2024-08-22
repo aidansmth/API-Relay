@@ -7,3 +7,4 @@ cert.pem
 /log
 API_relay_src/
 API_relay_src.zip
+*.pem
