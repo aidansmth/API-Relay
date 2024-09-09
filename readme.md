@@ -25,76 +25,50 @@ This was originally built as a project for KSCU 103.3 FM out of Santa Clara Univ
 2. Clone this repository and navigate to it.
 ```
 git clone https://github.com/aidansmth/API_relay.git
-cd API_relay`
+cd API_relay
 ```
 
 3. Find your Spinitron API key by logging in as an administrator and navigating to `Admin > Automation and API`. Add the the API key as an environmental variable to your current shell instance with `export SPIN_KEY=your_api_key`.
 
-4. From the root of the project, run the program with `LOCAL=OK cargo run`. The endpoints will be avaliable at `localhost:8080`. _Please note that spins will not update automatically unless run externally and configured with Spinitron below._
+4. From the root of the project, run the program with `LOCAL=OK cargo run`. With 'LOCAL=OK', endpoints will be avaliable at `localhost:8080` instead of port 80. _Spins will not update automatically unless run externally and configured with Spinitron below._
 
-## Running on a Server
-The following instructions create an instance of the API Relay Server hosted on AWS. For other hosts or to host the server yourself, different containerization schemes may apply.
+## Running in a Container
+This project can be run using either Docker directly or Docker Compose. Choose the method that best suits your needs.
 
-1. Create a `.env` file in the root directory of the project. This file will contain your station's Spinitron API key. _If you did this earlier to run project locally, you can skip this step._
+### Option 1: Using Docker
 
-2. Create a deployable .zip file. From the root of your project, run the following command. You should see a repo.zip file created in /target/.
-```
-git archive --add-file .env --format=zip HEAD -o ./target/repo.zip
-```
+1. Build the Docker image:
+   ```
+   docker build -t api_relay .
+   ```
 
-3. To launch the server on AWS's Elastic Beanstalk service, navigate to the Elastic Beanstalk page within AWS and then click `Create environment`. Then, use the following configuration options. If a configuration option is not listed, it shouldn't been needed for the application to function correctly so use your best judgement. 
+2. Run the container:
+   ```
+   docker run -d --name {CHOOSE CONTAINER NAME} -p 80:80 -e SPIN_KEY="{SPINITRON API KEY}" --restart unless-stopped api_relay
+   ```
 
-| Field | Recommended Setting |
-| :--- | :--- |
-| Environment tier | Web server environment |
-| Platform type | Managed Platform |
-| Platform | Docker |
-| Platform branch | Docker running on 64bit Amazon Linux 2 |
-| Platform version | 3.5.9 |
-| Application code | Upload your code |
-| Local file | Choose the repo.zip file you created earlier |
-| Preset | Single instance (free tier eligible) |
+   Replace `your_spin_key_here` with your actual SPIN_KEY.
 
-4. Continue with configuration
+3. Access the application at `http://localhost`
 
-| Field | Recommended Setting |
-| :--- | :--- |
-| Service role | Create and use new service role |
-| Public IP address | Activated |
-| Health reporting | Enchanced |
+### Option 2: Using Docker Compose
 
-5. To launch your instance, click `Submit` after reviewing your settings. Please note that it can take up to twenty minutes for Elastic Beanstalk to have your instance be fully accessible.
+1. Make sure you have Docker Compose installed on your system.
 
-6. <details><summary>Configuring Spinitron Metadata Push</summary> <br>
+2. Either add SPIN_KEY as an environmental variable or create a `.env` file in the project root and add your SPIN_KEY:
+   ```
+   SPIN_KEY={SPINITRON API KEY}
+   ```
 
-    Your API server will rely on Spinitron's Metadata  Push feature to update the server with new tracks as they're detected/logged to Spinitron. This prevents constant polling of Spinitron's API by the server.
+3. Run the following command to start the service:
+   ```
+   docker-compose up
+   ```
 
-    1. Login in to Spinitron as an administrator and navigate to `Admin > Metadata Push`. 
-    2. Click `New Channel` and enter the following. You can leave all other fields with their defaults.
+4. Access the application at `http://localhost`
 
-    | Field | Recommended Setting |
-    | :--- | :--- |
-    | Channel Name | API Relay Push |
-    | Template | POST http://[insert your server's web address]/spins/update
-    | Enabled | True |
-
-    3. To ensure that the Metadata Push is working successfully, navigate to `Metadata Push Logs` and wait for a new spin to be detected/logged. If successful, you should see a push with the status code `OK`.
-</details>
-
-7. Once launched and the health status is listed as healthly, you can access your server using it's web address (should resemble `*.[aws-region].elasticbeanstalk.com/`). The easiest endpoint to test is `http://[your server's web address]/spins/get`.
-
-## Configuring HTTPS and Routing
-This is recommended for advanced users only, but may be required if you're making  a program where requests to the API Relay are made client side, such as a radio station website.
-
-1. Route a custom domain or subdomain through AWS Route 53.
-
-2. Provision an HTTPS certificate for that custom domain using AWS Certificate Manager.
-
-3. Create a load balancer in AWS Elastic Beanstalk. Be sure to add the HTTPS Certificate from the last step to the load balancer.
-
-4. Configure HTTP and HTTPS forwarding rules. Your load balancer should accept both HTTP and HTTPS, but only forward all requests to your Elastic Beanstalk instance as HTTP.
-
-5. Test by requesting spin data using HTTPS, such as `https://[your custom domain]/spins/get`.
+## Configuring HTTPS with AWS
+HTTPS may be a security requirement if browsers are sending requests to the Relay, such as for a (station website)[kscu.org]. Given the high costs of AWS load balancers, I now recommend using a single cloud instance running both a container and nginx reverse proxy to handle HTTPS certificates. Instructions on how to do this can be found (here)[].
 
 ## Limitations
 - `/spins/get` only returns the last ten logged spins.
@@ -103,8 +77,6 @@ This is recommended for advanced users only, but may be required if you're makin
 - As show info is fetched at the top of the hour, it can take a second or two to update on the server. It's safe to fetch new show data three seconds after the top of the hour.
 
 ## Dependencies
-
-This project uses several dependencies to provide its functionality. You'll need the following Rust crates:
 
 - [**Tokio**](https://docs.rs/tokio/1/tokio/) - A runtime for asynchronous programming in Rust, enabling non-blocking I/O operations. We're using the full feature set.
 
