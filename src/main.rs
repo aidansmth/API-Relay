@@ -4,7 +4,7 @@ extern crate log;
 use std::{
     collections::HashMap,
     env,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -12,24 +12,33 @@ use handlers::Message;
 use tokio::sync::mpsc::UnboundedSender;
 use warp::Filter;
 
-
 use log::LevelFilter;
 use log4rs::append::file::FileAppender;
-use log4rs::encode::pattern::PatternEncoder;
 use log4rs::config::{Appender, Config, Root};
+use log4rs::encode::pattern::PatternEncoder;
+
+// Define a global constant to store the Spinitron API Key
+static SPIN_API_KEY: OnceLock<String> = OnceLock::new();
+
+fn get_api_key() -> &'static str {
+    SPIN_API_KEY.get_or_init(|| {
+        env::var("SPIN_KEY").expect(
+            "Environmental variable SPIN_KEY (your station's Spinitron API Key) must be set.",
+        )
+    })
+}
 
 #[tokio::main]
 async fn main() {
-
     let logfile = FileAppender::builder()
         .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
-        .build("log/output.log").unwrap();
+        .build("log/output.log")
+        .unwrap();
 
     let config = Config::builder()
         .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        .build(Root::builder()
-                   .appender("logfile")
-                   .build(LevelFilter::Info)).unwrap();
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))
+        .unwrap();
 
     log4rs::init_config(config).unwrap();
 
@@ -140,7 +149,7 @@ mod filters {
     pub fn spin_update(
         spin_db: Db,
         users: handlers::Users,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone{
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path!("spins" / "update")
             .and(warp::post())
             .and(is_form_content())
@@ -156,12 +165,15 @@ mod filters {
                         Err(e) => {
                             error!("Error fetching:{:?}", e);
                             return Ok::<_, Infallible>(
-                                warp::reply::with_status("Error", warp::http::StatusCode::INTERNAL_SERVER_ERROR)
-                                    .into_response(),
+                                warp::reply::with_status(
+                                    "Error",
+                                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                )
+                                .into_response(),
                             );
                         }
                     }
-                    let _ = handlers::send_update(users.clone());
+                    handlers::send_update(users.clone());
                     // Must satisfy return type
                     Ok::<_, Infallible>(
                         warp::reply::with_status("OK", warp::http::StatusCode::OK).into_response(),
@@ -233,7 +245,6 @@ mod filters {
 mod handlers {
     use std::{
         collections::HashMap,
-        env,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -242,12 +253,14 @@ mod handlers {
 
     use futures_util::Stream;
     use log::{debug, info};
-    use serde_json::{Value, Map};
+    use serde_json::{Map, Value};
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
-    use warp::{sse::Event};
+    use warp::sse::Event;
 
     use futures_util::stream::StreamExt;
+
+    use crate::get_api_key;
 
     use super::models::Db;
 
@@ -300,33 +313,33 @@ mod handlers {
     pub async fn update_spins_no_reply(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
         info!("POST recieved from Spinitron, updating spins");
         let data_source_url = "https://spinitron.com/api/spins/?access-token=";
-        let access_token = match env::var("SPIN_KEY") {
-            Ok(v) => v,
-            Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
-        };
-
+        let access_token = get_api_key();
         let count_url = "&count=10";
-        let data_source_url = data_source_url.to_owned() + &access_token + count_url;
+        let data_source_url = data_source_url.to_owned() + access_token + count_url;
 
         trace!("Sending a request to {}", data_source_url);
 
         let resp = reqwest::get(data_source_url).await;
-        let resp_str;
-        
-        match resp {
+
+        let resp_str = match resp {
             Err(e) => {
                 error!("Couldn't update spins: {}", e);
-                return Ok(warp::reply::with_status("Couldn't fetch spins.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                return Ok(warp::reply::with_status(
+                    "Couldn't fetch spins.",
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ));
             }
-            Ok(v) => resp_str = v,
-        }
-
+            Ok(v) => v,
+        };
 
         let str = resp_str.text().await.unwrap();
 
         // If str is empty, return
-        if str == "" {
-            return Ok(warp::reply::with_status("Response was empty.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+        if str.is_empty() {
+            return Ok(warp::reply::with_status(
+                "Response was empty.",
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
 
         let v: Value = serde_json::from_str(&str).unwrap();
@@ -334,47 +347,62 @@ mod handlers {
         // Store in db
         let mut db = db.lock().await;
         *db = remove_links_spins(v).await;
-        return Ok(warp::reply::with_status("Finished updating spins.", warp::http::StatusCode::OK));
+        Ok(warp::reply::with_status(
+            "Finished updating spins.",
+            warp::http::StatusCode::OK,
+        ))
     }
 
     pub async fn update_shows(db: Db) -> Result<impl warp::Reply, warp::Rejection> {
         let data_source_url = "https://spinitron.com/api/shows/?access-token=";
-        let access_token = match env::var("SPIN_KEY") {
-            Ok(v) => v,
-            Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
-        };
+        let access_token = get_api_key();
+        // let access_token = match get_api_key() {
+        //     Ok(v) => v,
+        //     Err(e) => panic!("Couldn't read SPIN_KEY: {}", e),
+        // };
 
         let count_url = "&count=2";
-        let data_source_url = data_source_url.to_owned() + &access_token + count_url;
+        let data_source_url = data_source_url.to_owned() + access_token + count_url;
         trace!("Sending a request to {}", data_source_url);
         let resp = reqwest::get(data_source_url).await;
-        let resp_str;
         
-        match resp {
+        let resp_str = match resp {
             Err(e) => {
                 error!("Couldn't get shows: {}", e);
-                return Ok(warp::reply::with_status("Couldn't fetch shows.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                return Ok(warp::reply::with_status(
+                    "Couldn't fetch shows.",
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ));
             }
-            Ok(v) => resp_str = v,
-        }
+            Ok(v) => v,
+        };
 
         let str = resp_str.text().await.unwrap();
 
         // If str is empty, return
-        if str == "" {
-            return Ok(warp::reply::with_status("Response was empty.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+        if str.is_empty() {
+            return Ok(warp::reply::with_status(
+                "Response was empty.",
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ));
         }
-        
+
         let v: Value = serde_json::from_str(&str).unwrap();
         let mut new_v = remove_links_shows(v.clone()).await;
-        
+
         // Get the amount of DJs in the current/first up show
-        let dj1_count = v["items"][0]["_links"]["personas"].as_array().unwrap().len();
-        let dj2_count = v["items"][1]["_links"]["personas"].as_array().unwrap().len();
+        let dj1_count = v["items"][0]["_links"]["personas"]
+            .as_array()
+            .unwrap()
+            .len();
+        let dj2_count = v["items"][1]["_links"]["personas"]
+            .as_array()
+            .unwrap()
+            .len();
 
         // Loop over DJs by dj1_count length
         for i in 0..dj1_count {
-            let dj_link= v["items"][0]["_links"]["personas"][i]["href"]
+            let dj_link = v["items"][0]["_links"]["personas"][i]["href"]
                 .as_str()
                 .unwrap();
             if i == 0 {
@@ -383,11 +411,15 @@ mod handlers {
                     Ok(v) => v,
                     Err(e) => {
                         error!("Couldn't get dj_data: {}", e);
-                        return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                        return Ok(warp::reply::with_status(
+                            "Couldn't fetch DJ data.",
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
                     }
                 };
-                let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
-                
+                let dj_data: Value =
+                    remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+
                 new_v["dj-0"] = dj_data;
             }
             let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
@@ -395,17 +427,20 @@ mod handlers {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Couldn't get dj_data: {}", e);
-                    return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                    return Ok(warp::reply::with_status(
+                        "Couldn't fetch DJ data.",
+                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    ));
                 }
             };
             let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
-            
+
             new_v["v2"]["dj-0"][i.to_string()] = dj_data;
         }
 
         // Loop over DJs by dj2_count length
         for i in 0..dj2_count {
-            let dj_link= v["items"][1]["_links"]["personas"][i]["href"]
+            let dj_link = v["items"][1]["_links"]["personas"][i]["href"]
                 .as_str()
                 .unwrap();
             if i == 0 {
@@ -414,11 +449,15 @@ mod handlers {
                     Ok(v) => v,
                     Err(e) => {
                         error!("Couldn't get dj_data: {}", e);
-                        return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                        return Ok(warp::reply::with_status(
+                            "Couldn't fetch DJ data.",
+                            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
                     }
                 };
-                let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
-                
+                let dj_data: Value =
+                    remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
+
                 new_v["dj-1"] = dj_data;
             }
             let dj_data = reqwest::get(dj_link).await.unwrap().text().await;
@@ -426,17 +465,20 @@ mod handlers {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Couldn't get dj_data: {}", e);
-                    return Ok(warp::reply::with_status("Couldn't fetch DJ data.", warp::http::StatusCode::INTERNAL_SERVER_ERROR));
+                    return Ok(warp::reply::with_status(
+                        "Couldn't fetch DJ data.",
+                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    ));
                 }
             };
             let dj_data: Value = remove_links_djs(serde_json::from_str(&dj_data).unwrap()).await;
-            
+
             new_v["v2"]["dj-1"][i.to_string()] = dj_data;
         }
 
         // Store in db
         let mut db = db.lock().await;
-        
+
         *db = new_v;
 
         Ok(warp::reply::with_status(
@@ -471,10 +513,6 @@ mod handlers {
         UserId(usize),
         Reply(String),
     }
-
-    // #[derive(Debug)]
-    // struct NotUtf8;
-    // impl warp::reject::Reject for NotUtf8 {}
 
     pub(crate) fn user_connected(
         users: Users,
@@ -516,10 +554,7 @@ mod headers {
     // create headers to be used in responses
     pub fn cors() -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "Access-Control-Allow-Origin",
-            HeaderValue::from_static("*"),
-        );
+        headers.insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
         headers.insert(
             "Access-Control-Allow-Methods",
             HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
